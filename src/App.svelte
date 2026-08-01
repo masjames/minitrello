@@ -58,12 +58,11 @@
     showImport = false
     importText = ''
     try {
-      const res = await fetch('/api/cards', {
+      await send('/api/cards', {
         method: 'PUT',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ cards: parsed }),
       })
-      if (!res.ok) throw new Error(await res.text())
       showToast(`Imported ${parsed.length} cards!`)
     } catch (e) {
       error = 'Import failed: ' + e.message
@@ -115,21 +114,76 @@
     return next
   }
 
-  async function loadCards() {
-    loading = true
-    error = ''
+  // --- sync layer ---------------------------------------------------------
+  // syncState: 'online' | 'syncing' | 'error'
+  let syncState = $state('syncing')
+  let lastSync = $state(0)
+  let now = $state(Date.now())
+  let pending = 0 // in-flight local writes; block polling from clobbering them
+
+  const syncAgo = $derived.by(() => {
+    if (!lastSync) return ''
+    const s = Math.max(0, Math.round((now - lastSync) / 1000))
+    if (s < 2) return 'just now'
+    if (s < 60) return `${s}s ago`
+    return `${Math.round(s / 60)}m ago`
+  })
+
+  function markSynced() {
+    syncState = pending > 0 ? 'syncing' : 'online'
+    lastSync = Date.now()
+  }
+
+  // wrapper for every mutating request: tracks sync status + errors
+  async function send(url, opts) {
+    pending++
+    syncState = 'syncing'
     try {
-      const res = await fetch('/api/cards')
-      if (!res.ok) throw new Error(await res.text())
-      cards = group(await res.json())
+      const r = await fetch(url, opts)
+      if (!r.ok) throw new Error(await r.text())
+      return r
     } catch (e) {
-      error = 'Failed to load: ' + e.message
+      syncState = 'error'
+      throw e
     } finally {
-      loading = false
+      pending--
+      if (pending === 0 && syncState !== 'error') markSynced()
     }
   }
 
-  loadCards()
+  async function refetch({ silent = true } = {}) {
+    if (!silent) loading = true
+    if (silent && syncState !== 'error') syncState = 'syncing'
+    try {
+      const res = await fetch('/api/cards')
+      if (!res.ok) throw new Error(await res.text())
+      const rows = await res.json()
+      // don't overwrite while the user is editing / importing / mid-write
+      if (editingId === null && pending === 0 && !showImport) {
+        cards = group(rows)
+      }
+      if (pending === 0) markSynced()
+    } catch (e) {
+      syncState = 'error'
+      if (!silent) error = 'Failed to load: ' + e.message
+    } finally {
+      if (!silent) loading = false
+    }
+  }
+
+  refetch({ silent: false })
+
+  // periodic pull so every session converges (near-realtime)
+  $effect(() => {
+    const poll = setInterval(() => {
+      if (typeof document === 'undefined' || document.visibilityState === 'visible') refetch()
+    }, 4000)
+    const clock = setInterval(() => (now = Date.now()), 1000)
+    return () => {
+      clearInterval(poll)
+      clearInterval(clock)
+    }
+  })
 
   async function addCard(colId) {
     const text = drafts[colId].trim()
@@ -137,7 +191,7 @@
     const card = { id: crypto.randomUUID(), col: colId, text, position: Date.now() }
     cards[colId] = [...cards[colId], card]
     drafts[colId] = ''
-    await fetch('/api/cards', {
+    await send('/api/cards', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify(card),
@@ -146,7 +200,7 @@
 
   async function removeCard(colId, id) {
     cards[colId] = cards[colId].filter((c) => c.id !== id)
-    await fetch('/api/cards?id=' + encodeURIComponent(id), { method: 'DELETE' })
+    await send('/api/cards?id=' + encodeURIComponent(id), { method: 'DELETE' })
       .catch(() => (error = 'Delete failed'))
   }
 
@@ -168,7 +222,7 @@
     cards[colId] = cards[colId].map((c) => (c.id === id ? { ...c, text } : c))
     editingId = null
     editText = ''
-    await fetch('/api/cards', {
+    await send('/api/cards', {
       method: 'PATCH',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ id, text }),
@@ -186,7 +240,7 @@
     // auto-copy updated board while still in the click gesture
     copyText(boardToText())
     showToast('Updates copied to clipboard!')
-    await fetch('/api/cards', {
+    await send('/api/cards', {
       method: 'PATCH',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ id, col: target.id, position }),
@@ -196,6 +250,12 @@
 
 <header>
   <h1>Mini Trello</h1>
+  <span class="sync sync-{syncState}" title="Last sync {syncAgo}">
+    <span class="dot"></span>
+    {#if syncState === 'syncing'}Syncing…
+    {:else if syncState === 'error'}Offline
+    {:else}Synced{#if syncAgo} · {syncAgo}{/if}{/if}
+  </span>
   <button class="copy" onclick={copyBoard}>{copied ? '✓ Copied' : 'Copy'}</button>
   <button class="paste" onclick={() => (showImport = true)}>Paste update</button>
   {#if error}<span class="err">{error}</span>{/if}
@@ -286,13 +346,15 @@
     padding: env(safe-area-inset-top) 16px 0;
     padding-top: max(env(safe-area-inset-top), 12px);
     display: flex;
-    align-items: baseline;
-    gap: 12px;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 8px 10px;
   }
   h1 {
-    margin: 8px 0 12px;
+    margin: 8px 8px 8px 0;
     font-size: 20px;
     letter-spacing: 0.5px;
+    margin-right: auto;
   }
   .copy {
     background: #25d366;
@@ -317,6 +379,28 @@
   }
   .paste:active { transform: scale(0.96); }
   .err { color: #f87171; font-size: 13px; }
+  .sync {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 12px;
+    color: var(--muted);
+    padding: 4px 10px;
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    white-space: nowrap;
+  }
+  .sync .dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--muted);
+  }
+  .sync-online .dot { background: #22c55e; }
+  .sync-syncing .dot { background: #38bdf8; animation: pulse 1s infinite; }
+  .sync-error { color: #f87171; }
+  .sync-error .dot { background: #f87171; }
+  @keyframes pulse { 50% { opacity: 0.3; } }
 
   .sheet {
     position: fixed;
@@ -403,7 +487,8 @@
     padding: 0 12px 16px;
     overflow-x: auto;
     scroll-snap-type: x mandatory;
-    height: calc(100dvh - 56px);
+    flex: 1;
+    min-height: 0;
     -webkit-overflow-scrolling: touch;
   }
   .column {
