@@ -1,6 +1,13 @@
 import { neon } from '@neondatabase/serverless'
 
-const sql = neon(process.env.DATABASE_URL)
+let _sql
+function getSql() {
+  if (!process.env.DATABASE_URL) {
+    throw new Error('DATABASE_URL env var is not set on this deployment')
+  }
+  if (!_sql) _sql = neon(process.env.DATABASE_URL)
+  return _sql
+}
 
 async function readBody(req) {
   if (req.body) return typeof req.body === 'string' ? JSON.parse(req.body) : req.body
@@ -11,6 +18,8 @@ async function readBody(req) {
 
 export default async function handler(req, res) {
   try {
+    const sql = getSql()
+
     if (req.method === 'GET') {
       const rows = await sql`SELECT id, col, text, position FROM cards ORDER BY position ASC`
       return res.status(200).json(rows)
