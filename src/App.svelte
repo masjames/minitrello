@@ -10,6 +10,8 @@
   let drafts = $state({ backlog: '', todo: '', doing: '', done: '' })
   let loading = $state(true)
   let error = $state('')
+  let editingId = $state(null)
+  let editText = $state('')
 
   function group(rows) {
     const next = { backlog: [], todo: [], doing: [], done: [] }
@@ -54,6 +56,31 @@
       .catch(() => (error = 'Delete failed'))
   }
 
+  function startEdit(card) {
+    editingId = card.id
+    editText = card.text
+  }
+
+  function cancelEdit() {
+    editingId = null
+    editText = ''
+  }
+
+  async function saveEdit(colId, id) {
+    const text = editText.trim()
+    if (!text) return cancelEdit()
+    const card = cards[colId].find((c) => c.id === id)
+    if (!card || text === card.text) return cancelEdit()
+    cards[colId] = cards[colId].map((c) => (c.id === id ? { ...c, text } : c))
+    editingId = null
+    editText = ''
+    await fetch('/api/cards', {
+      method: 'PATCH',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ id, text }),
+    }).catch(() => (error = 'Edit failed'))
+  }
+
   async function move(colId, id, dir) {
     const idx = COLUMNS.findIndex((c) => c.id === colId)
     const target = COLUMNS[idx + dir]
@@ -89,7 +116,20 @@
         {/if}
         {#each cards[col.id] as card (card.id)}
           <article class="card">
-            <p>{card.text}</p>
+            {#if editingId === card.id}
+              <textarea
+                class="edit"
+                bind:value={editText}
+                rows="2"
+                onkeydown={(e) => {
+                  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); saveEdit(col.id, card.id) }
+                  if (e.key === 'Escape') cancelEdit()
+                }}
+                {@attach (el) => el.focus()}
+                onblur={() => saveEdit(col.id, card.id)}></textarea>
+            {:else}
+              <p onclick={() => startEdit(card)} title="Tap to edit">{card.text}</p>
+            {/if}
             <div class="card-actions">
               <button
                 class="ghost"
@@ -191,6 +231,19 @@
     font-size: 15px;
     line-height: 1.35;
     word-break: break-word;
+    cursor: text;
+  }
+  .edit {
+    width: 100%;
+    margin-bottom: 8px;
+    background: var(--bg);
+    border: 1px solid var(--accent);
+    border-radius: 8px;
+    padding: 8px 10px;
+    font-size: 15px;
+    line-height: 1.35;
+    resize: vertical;
+    outline: none;
   }
   .card-actions {
     display: flex;
