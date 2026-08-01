@@ -12,6 +12,100 @@
   let error = $state('')
   let editingId = $state(null)
   let editText = $state('')
+  let copied = $state(false)
+  let toast = $state('')
+  let toastTimer
+  let showImport = $state(false)
+  let importText = $state('')
+
+  const COL_ALIASES = {
+    BACKLOG: 'backlog',
+    'TO DO': 'todo',
+    TODO: 'todo',
+    DOING: 'doing',
+    'IN PROGRESS': 'doing',
+    DONE: 'done',
+  }
+
+  function parseChat(text) {
+    const out = []
+    let cur = null
+    let pos = 0
+    for (const raw of text.split(/\r?\n/)) {
+      const line = raw.trim()
+      if (!line) continue
+      // header? strip markdown + trailing "(n)"
+      const head = line.replace(/[*_~]/g, '').replace(/\(\d+\)\s*$/, '').trim().toUpperCase()
+      if (COL_ALIASES[head]) {
+        cur = COL_ALIASES[head]
+        continue
+      }
+      if (!cur) continue
+      const t = line.replace(/^[•\-*]\s+/, '').replace(/[*_~]/g, '').trim()
+      if (!t || t.toLowerCase() === '(empty)') continue
+      out.push({ id: crypto.randomUUID(), col: cur, text: t, position: ++pos })
+    }
+    return out
+  }
+
+  async function applyImport() {
+    const parsed = parseChat(importText)
+    if (!parsed.length) {
+      showToast('Nothing to import — check the format')
+      return
+    }
+    cards = group(parsed)
+    showImport = false
+    importText = ''
+    try {
+      const res = await fetch('/api/cards', {
+        method: 'PUT',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ cards: parsed }),
+      })
+      if (!res.ok) throw new Error(await res.text())
+      showToast(`Imported ${parsed.length} cards!`)
+    } catch (e) {
+      error = 'Import failed: ' + e.message
+    }
+  }
+
+  function showToast(msg) {
+    toast = msg
+    clearTimeout(toastTimer)
+    toastTimer = setTimeout(() => (toast = ''), 2000)
+  }
+
+  function boardToText() {
+    const blocks = COLUMNS.map((col) => {
+      const items = cards[col.id]
+      const lines = items.length
+        ? items.map((c) => `• ${c.text}`).join('\n')
+        : '_(empty)_'
+      return `*${col.title.toUpperCase()}* (${items.length})\n${lines}`
+    })
+    return blocks.join('\n\n')
+  }
+
+  async function copyText(text) {
+    try {
+      await navigator.clipboard.writeText(text)
+    } catch {
+      // fallback for non-secure contexts
+      const ta = document.createElement('textarea')
+      ta.value = text
+      document.body.appendChild(ta)
+      ta.select()
+      document.execCommand('copy')
+      ta.remove()
+    }
+  }
+
+  async function copyBoard() {
+    await copyText(boardToText())
+    copied = true
+    setTimeout(() => (copied = false), 1800)
+  }
 
   function group(rows) {
     const next = { backlog: [], todo: [], doing: [], done: [] }
@@ -89,6 +183,9 @@
     cards[colId] = cards[colId].filter((c) => c.id !== id)
     const position = Date.now()
     cards[target.id] = [...cards[target.id], { ...card, col: target.id, position }]
+    // auto-copy updated board while still in the click gesture
+    copyText(boardToText())
+    showToast('Updates copied to clipboard!')
     await fetch('/api/cards', {
       method: 'PATCH',
       headers: { 'content-type': 'application/json' },
@@ -99,8 +196,32 @@
 
 <header>
   <h1>Mini Trello</h1>
+  <button class="copy" onclick={copyBoard}>{copied ? '✓ Copied' : 'Copy'}</button>
+  <button class="paste" onclick={() => (showImport = true)}>Paste update</button>
   {#if error}<span class="err">{error}</span>{/if}
 </header>
+
+{#if showImport}
+  <div class="sheet" onclick={() => (showImport = false)}>
+    <div class="sheet-inner" onclick={(e) => e.stopPropagation()}>
+      <h2>Paste board text</h2>
+      <p class="hint">Paste a WhatsApp update. Recognizes <b>*BACKLOG*</b>, <b>*TO DO*</b>, <b>*DOING*</b>, <b>*DONE*</b> headers and <b>•</b> items. This replaces the whole board.</p>
+      <textarea
+        class="import-area"
+        rows="10"
+        placeholder={'*BACKLOG*\n• first task\n• second task\n\n*TO DO*\n• ...'}
+        bind:value={importText}></textarea>
+      <div class="sheet-actions">
+        <button class="ghost-btn" onclick={() => (showImport = false)}>Cancel</button>
+        <button class="primary" onclick={applyImport}>Apply</button>
+      </div>
+    </div>
+  </div>
+{/if}
+
+{#if toast}
+  <div class="toast">{toast}</div>
+{/if}
 
 <main>
   {#each COLUMNS as col, i}
@@ -173,7 +294,108 @@
     font-size: 20px;
     letter-spacing: 0.5px;
   }
+  .copy {
+    background: #25d366;
+    color: #04220f;
+    border: none;
+    border-radius: 8px;
+    padding: 7px 12px;
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+  }
+  .copy:active { transform: scale(0.96); }
+  .paste {
+    background: var(--surface-2);
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 7px 12px;
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+  }
+  .paste:active { transform: scale(0.96); }
   .err { color: #f87171; font-size: 13px; }
+
+  .sheet {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.6);
+    display: flex;
+    align-items: flex-end;
+    justify-content: center;
+    z-index: 100;
+  }
+  .sheet-inner {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 16px 16px 0 0;
+    width: 100%;
+    max-width: 560px;
+    padding: 18px 16px calc(18px + env(safe-area-inset-bottom));
+    animation: slideup 0.2s ease;
+  }
+  @keyframes slideup {
+    from { transform: translateY(30px); opacity: 0.6; }
+    to { transform: translateY(0); opacity: 1; }
+  }
+  .sheet-inner h2 { margin: 0 0 6px; font-size: 17px; }
+  .sheet-inner .hint { margin: 0 0 12px; font-size: 13px; color: var(--muted); }
+  .import-area {
+    width: 100%;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 10px 12px;
+    font-size: 14px;
+    line-height: 1.4;
+    resize: vertical;
+    outline: none;
+    color: var(--text);
+  }
+  .import-area:focus { border-color: var(--accent); }
+  .sheet-actions {
+    display: flex;
+    gap: 10px;
+    justify-content: flex-end;
+    margin-top: 14px;
+  }
+  .ghost-btn {
+    background: transparent;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 10px 16px;
+    cursor: pointer;
+  }
+  .primary {
+    background: var(--accent);
+    color: #04222f;
+    border: none;
+    border-radius: 8px;
+    padding: 10px 18px;
+    font-weight: 700;
+    cursor: pointer;
+  }
+  .toast {
+    position: fixed;
+    left: 50%;
+    bottom: calc(20px + env(safe-area-inset-bottom));
+    transform: translateX(-50%);
+    background: #25d366;
+    color: #04220f;
+    font-weight: 600;
+    font-size: 14px;
+    padding: 10px 18px;
+    border-radius: 999px;
+    box-shadow: 0 6px 20px rgba(0, 0, 0, 0.4);
+    z-index: 50;
+    animation: pop 0.18s ease;
+  }
+  @keyframes pop {
+    from { opacity: 0; transform: translate(-50%, 8px); }
+    to { opacity: 1; transform: translate(-50%, 0); }
+  }
   .hint { color: var(--muted); font-size: 13px; padding: 4px 6px; }
   main {
     display: flex;

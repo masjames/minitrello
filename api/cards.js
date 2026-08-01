@@ -35,6 +35,20 @@ export default async function handler(req, res) {
       return res.status(201).json({ ok: true })
     }
 
+    if (req.method === 'PUT') {
+      // bulk replace the whole board (used by paste-to-import)
+      const { cards } = await readBody(req)
+      if (!Array.isArray(cards)) return res.status(400).json({ error: 'cards array required' })
+      await sql`DELETE FROM cards`
+      for (const c of cards) {
+        await sql`
+          INSERT INTO cards (id, col, text, position)
+          VALUES (${c.id}, ${c.col}, ${c.text}, ${c.position})
+        `
+      }
+      return res.status(200).json({ ok: true, count: cards.length })
+    }
+
     if (req.method === 'PATCH') {
       const { id, col, text, position } = await readBody(req)
       if (!id) return res.status(400).json({ error: 'id required' })
@@ -55,7 +69,7 @@ export default async function handler(req, res) {
       return res.status(200).json({ ok: true })
     }
 
-    res.setHeader('Allow', 'GET, POST, PATCH, DELETE')
+    res.setHeader('Allow', 'GET, POST, PUT, PATCH, DELETE')
     return res.status(405).json({ error: 'method not allowed' })
   } catch (err) {
     console.error(err)
