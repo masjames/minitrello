@@ -120,6 +120,14 @@
   let lastSync = $state(0)
   let now = $state(Date.now())
   let pending = 0 // in-flight local writes; block polling from clobbering them
+  let lastActivity = Date.now()
+  const IDLE_MS = 10000 // pause polling after 10s of no interaction
+
+  function bumpActivity() {
+    const wasIdle = Date.now() - lastActivity > IDLE_MS
+    lastActivity = Date.now()
+    if (wasIdle) refetch() // resume immediately on return
+  }
 
   const syncAgo = $derived.by(() => {
     if (!lastSync) return ''
@@ -176,13 +184,25 @@
   // periodic pull so every session converges (near-realtime)
   $effect(() => {
     const poll = setInterval(() => {
-      if (typeof document === 'undefined' || document.visibilityState === 'visible') refetch()
+      if (typeof document !== 'undefined' && document.visibilityState !== 'visible') return
+      if (Date.now() - lastActivity > IDLE_MS) {
+        if (syncState !== 'error') syncState = 'paused'
+        return // idle: skip network until user interacts again
+      }
+      refetch()
     }, 4000)
     const clock = setInterval(() => (now = Date.now()), 1000)
     return () => {
       clearInterval(poll)
       clearInterval(clock)
     }
+  })
+
+  // track user interaction to drive idle pause / resume
+  $effect(() => {
+    const evs = ['pointerdown', 'keydown', 'touchstart', 'wheel', 'focus']
+    for (const e of evs) window.addEventListener(e, bumpActivity, { passive: true })
+    return () => evs.forEach((e) => window.removeEventListener(e, bumpActivity))
   })
 
   async function addCard(colId) {
@@ -254,6 +274,7 @@
     <span class="dot"></span>
     {#if syncState === 'syncing'}Syncing…
     {:else if syncState === 'error'}Offline
+    {:else if syncState === 'paused'}Paused{#if syncAgo} · {syncAgo}{/if}
     {:else}Synced{#if syncAgo} · {syncAgo}{/if}{/if}
   </span>
   <button class="copy" onclick={copyBoard}>{copied ? '✓ Copied' : 'Copy'}</button>
@@ -398,6 +419,7 @@
   }
   .sync-online .dot { background: #22c55e; }
   .sync-syncing .dot { background: #38bdf8; animation: pulse 1s infinite; }
+  .sync-paused .dot { background: #eab308; }
   .sync-error { color: #f87171; }
   .sync-error .dot { background: #f87171; }
   @keyframes pulse { 50% { opacity: 0.3; } }
