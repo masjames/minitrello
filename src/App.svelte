@@ -6,51 +6,73 @@
     { id: 'done', title: 'Done' },
   ]
 
-  const STORAGE_KEY = 'minitrello.v1'
+  let cards = $state({ backlog: [], todo: [], doing: [], done: [] })
+  let drafts = $state({ backlog: '', todo: '', doing: '', done: '' })
+  let loading = $state(true)
+  let error = $state('')
 
-  function load() {
+  function group(rows) {
+    const next = { backlog: [], todo: [], doing: [], done: [] }
+    for (const r of rows) {
+      if (next[r.col]) next[r.col].push(r)
+    }
+    return next
+  }
+
+  async function loadCards() {
+    loading = true
+    error = ''
     try {
-      const raw = localStorage.getItem(STORAGE_KEY)
-      if (raw) return JSON.parse(raw)
-    } catch {}
-    return {
-      backlog: [{ id: crypto.randomUUID(), text: 'Tap + to add a card' }],
-      todo: [],
-      doing: [],
-      done: [],
+      const res = await fetch('/api/cards')
+      if (!res.ok) throw new Error(await res.text())
+      cards = group(await res.json())
+    } catch (e) {
+      error = 'Failed to load: ' + e.message
+    } finally {
+      loading = false
     }
   }
 
-  let cards = $state(load())
-  let drafts = $state({ backlog: '', todo: '', doing: '', done: '' })
+  loadCards()
 
-  $effect(() => {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(cards))
-  })
-
-  function addCard(colId) {
+  async function addCard(colId) {
     const text = drafts[colId].trim()
     if (!text) return
-    cards[colId] = [...cards[colId], { id: crypto.randomUUID(), text }]
+    const card = { id: crypto.randomUUID(), col: colId, text, position: Date.now() }
+    cards[colId] = [...cards[colId], card]
     drafts[colId] = ''
+    await fetch('/api/cards', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(card),
+    }).catch(() => (error = 'Save failed'))
   }
 
-  function removeCard(colId, id) {
+  async function removeCard(colId, id) {
     cards[colId] = cards[colId].filter((c) => c.id !== id)
+    await fetch('/api/cards?id=' + encodeURIComponent(id), { method: 'DELETE' })
+      .catch(() => (error = 'Delete failed'))
   }
 
-  function move(colId, id, dir) {
+  async function move(colId, id, dir) {
     const idx = COLUMNS.findIndex((c) => c.id === colId)
     const target = COLUMNS[idx + dir]
     if (!target) return
     const card = cards[colId].find((c) => c.id === id)
     cards[colId] = cards[colId].filter((c) => c.id !== id)
-    cards[target.id] = [...cards[target.id], card]
+    const position = Date.now()
+    cards[target.id] = [...cards[target.id], { ...card, col: target.id, position }]
+    await fetch('/api/cards', {
+      method: 'PATCH',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ id, col: target.id, position }),
+    }).catch(() => (error = 'Move failed'))
   }
 </script>
 
 <header>
   <h1>Mini Trello</h1>
+  {#if error}<span class="err">{error}</span>{/if}
 </header>
 
 <main>
@@ -62,6 +84,9 @@
       </div>
 
       <div class="cards">
+        {#if loading}
+          <p class="hint">Loading…</p>
+        {/if}
         {#each cards[col.id] as card (card.id)}
           <article class="card">
             <p>{card.text}</p>
@@ -99,12 +124,17 @@
   header {
     padding: env(safe-area-inset-top) 16px 0;
     padding-top: max(env(safe-area-inset-top), 12px);
+    display: flex;
+    align-items: baseline;
+    gap: 12px;
   }
   h1 {
     margin: 8px 0 12px;
     font-size: 20px;
     letter-spacing: 0.5px;
   }
+  .err { color: #f87171; font-size: 13px; }
+  .hint { color: var(--muted); font-size: 13px; padding: 4px 6px; }
   main {
     display: flex;
     gap: 12px;
